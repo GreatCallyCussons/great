@@ -1,0 +1,187 @@
+/**
+ * Greatist Rhythm - Google Sheets/Drive API Layer
+ * All backend logic is client-side.
+ * 
+ * Switch between 'demo' and 'live' using API_MODE variable.
+ * 
+ * All fetches use CSV exports for Sheets:
+ *  Convert:
+ *   https://docs.google.com/spreadsheets/d/[ID]/edit#gid=[GID]
+ *  To:
+ *   https://docs.google.com/spreadsheets/d/[ID]/export?format=csv&gid=[GID]
+ *
+ * For live file uploads to Drive, insert your Google Drive API key and OAuth token below.
+ * 
+ * For writing/appending to Google Sheets, uses a Google Apps Script Web App endpoint.
+ * See: https://script.google.com/macros/s/AKfycbwIgV7faoXnIDvRq_T7bgOsVO5XRb2whFtS-DA8geHsE2COGn-G_aEtfYjL6cs-8a0/exec
+ * 
+ * To update the Apps Script endpoint, change the SHEET_WEBAPP_URL variable below.
+ */
+
+// === CONFIGURATION ===
+const API_MODE = localStorage.getItem('api_mode') || 'demo'; // 'live' or 'demo'
+
+// GOOGLE SHEETS (LIVE)
+const SHEETS = {
+  users: {
+    id: '1J38XISVzjz8yv4ZYo-Yq2OqDdKO4WZFWmH1lYjTXox8',
+    gid: '0'
+  },
+  artists: {
+    id: '1ML1vFrhCVIWwTYbQAU3xaWXEHL4fHOkuSccgKnYRcEA',
+    gid: '2069739105'
+  },
+  posts: {
+    id: '1MHel6sAqsezNW_Xz03zSwEhrUlmfjjyF6MKZlXQ04Bk',
+    gid: '0'
+  },
+  chats: {
+    id: '1lW00BoyyMT4gFnfnM_d0sq8P2ldekekC7T4RrXyRR1E',
+    gid: '0'
+  }
+};
+const DRIVE_FOLDER_ID = '1h5Qp5FTiwVd0B5WpyNsL5T1tvBvRxyom';
+
+// DEMO DATA
+const DEMO_JSON_PATH = 'data/demo.json';
+
+// === GOOGLE APPS SCRIPT WEB APP ENDPOINT ===
+const SHEET_WEBAPP_URL = "https://script.google.com/macros/s/AKfycbwIgV7faoXnIDvRq_T7bgOsVO5XRb2whFtS-DA8geHsE2COGn-G_aEtfYjL6cs-8a0/exec";
+
+// === GOOGLE DRIVE API SETUP ===
+// (For uploads, see uploadFileToDrive function below. Insert your API key and set up OAuth as per Google Drive API docs)
+const GOOGLE_API_KEY = ''; // <-- INSERT YOUR API KEY HERE
+const GOOGLE_OAUTH_TOKEN = ''; // <-- INSERT OAuth 2.0 token after user login
+
+// === UTILITY: Fetch Sheet as CSV and parse ===
+async function fetchSheet(sheetName) {
+  if (API_MODE === 'demo') {
+    const demo = await fetch(DEMO_JSON_PATH).then(r => r.json());
+    return demo[sheetName] || [];
+  }
+  const {id, gid} = SHEETS[sheetName];
+  const csvUrl = `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${gid}`;
+  const resp = await fetch(csvUrl);
+  const text = await resp.text();
+  return CSVToArray(text, ',').map(arr => {
+    // Map CSV to objects (header row)
+    if (!fetchSheet.headers) fetchSheet.headers = {};
+    if (!fetchSheet.headers[sheetName]) fetchSheet.headers[sheetName] = arr;
+    return arr;
+  }).reduce((acc, row, i, arrs) => {
+    if (i === 0) return acc;
+    const obj = {};
+    arrs[0].forEach((header, h) => obj[header] = row[h]);
+    acc.push(obj);
+    return acc;
+  }, []);
+}
+
+// === UTILITY: Append Row to Sheet (via Google Apps Script Webhook) ===
+async function appendToSheet(sheetName, rowObj) {
+  if (API_MODE === 'demo') {
+    let demo = await fetch(DEMO_JSON_PATH).then(r => r.json());
+    demo[sheetName] = demo[sheetName] || [];
+    demo[sheetName].push(rowObj);
+    localStorage.setItem('demo_'+sheetName, JSON.stringify(demo[sheetName]));
+    return true;
+  }
+  // Live mode: send POST to Apps Script Web App endpoint
+  // Add 'sheetName' so your Apps Script can route to the appropriate sheet
+  try {
+    const resp = await fetch(SHEET_WEBAPP_URL, {
+      method: "POST",
+      body: JSON.stringify({sheet: sheetName, ...rowObj}),
+      headers: {"Content-Type": "application/json"}
+    });
+    if (!resp.ok) {
+      throw new Error(`Sheet write failed: ${await resp.text()}`);
+    }
+    return true;
+  } catch (err) {
+    alert('Failed to save to Google Sheet: ' + err.message);
+    return false;
+  }
+}
+
+// === UTILITY: File Upload to Google Drive (needs OAuth flow) ===
+async function uploadFileToDrive(file, parentFolderId = DRIVE_FOLDER_ID) {
+  if (API_MODE === 'demo') {
+    return { url: 'https://via.placeholder.com/350x250?text=Demo+Upload', name: file.name };
+  }
+  // See: https://developers.google.com/drive/api/guides/upload-files
+  if (!GOOGLE_OAUTH_TOKEN) {
+    alert('Google Drive upload requires user OAuth. See comments in api.js.');
+    throw new Error('Missing OAuth token');
+  }
+  const metadata = {
+    name: file.name,
+    parents: [parentFolderId]
+  };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', file);
+
+  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + GOOGLE_OAUTH_TOKEN },
+    body: form
+  });
+  if (!response.ok) throw new Error('Upload failed');
+  const data = await response.json();
+  return { url: data.webViewLink, name: data.name };
+}
+
+// === Facebook Public Feed Embed (fetch OpenGraph) ===
+async function fetchFacebookPreview(url) {
+  // Facebook does not allow direct OpenGraph fetch due to CORS, but we can build preview links.
+  return {
+    text: 'Sample Facebook post preview (static, for demo).',
+    image: 'https://www.facebook.com/images/fb_icon_325x325.png'
+  };
+}
+
+// === CSV PARSER ===
+function CSVToArray(strData, strDelimiter) {
+  strDelimiter = (strDelimiter || ",");
+  var objPattern = new RegExp(
+      (
+          "(\\" + strDelimiter + "|\\r?\\n|\\r|^)" +
+          "(?:\"([^\"]*(?:\"\"[^\"]*)*)\"|" +
+          "([^\"\\" + strDelimiter + "\\r\\n]*))"
+      ),
+      "gi"
+  );
+  var arrData = [[]];
+  var arrMatches = null;
+  while (arrMatches = objPattern.exec(strData)){
+      var strMatchedDelimiter = arrMatches[1];
+      if (
+          strMatchedDelimiter.length &&
+          strMatchedDelimiter !== strDelimiter
+      ){
+          arrData.push([]);
+      }
+      var strMatchedValue;
+      if (arrMatches[2]){
+          strMatchedValue = arrMatches[2].replace(
+              new RegExp( "\"\"", "g" ), "\""
+          );
+      } else {
+          strMatchedValue = arrMatches[3];
+      }
+      arrData[arrData.length - 1].push(strMatchedValue);
+  }
+  return arrData;
+}
+
+// === API EXPORTS ===
+window.GRhythmAPI = {
+  fetchSheet,
+  appendToSheet,
+  uploadFileToDrive,
+  fetchFacebookPreview,
+  SHEETS,
+  API_MODE,
+  setMode: mode => { localStorage.setItem('api_mode', mode); location.reload(); }
+};
